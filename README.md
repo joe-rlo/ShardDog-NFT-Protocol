@@ -1,5 +1,38 @@
 # ShardNFTs
 
+This NFT contract implements a flexible and efficient system for managing multiple NFT collections (called "channels") using Merkle trees. Here's a high-level overview:
+
+The contract allows creation of multiple channels, each with its own metadata and Merkle root. Tokens are minted by providing a Merkle proof, which is verified against the channel's root. The contract stores minimal on-chain data: channel information, minted token IDs, and contract metadata. The off-chain component (middleware) manages the Merkle trees, token ownership, and generates proofs for minting. This design allows for efficient scaling of large NFT collections while minimizing on-chain storage costs. The middleware handles complex operations like creating channels, minting tokens, and updating Merkle roots, while the contract verifies proofs and maintains the core state. This hybrid approach balances the benefits of blockchain security with off-chain computational efficiency.
+
+# 1. Deploy the Smart Contract
+
+Build the contract
+cargo build --target wasm32-unknown-unknown --release
+
+Deploy the contract
+near deploy --accountId your-contract.testnet --wasmFile target/wasm32-unknown-unknown/release/nft_contract.wasm
+
+Initialize the contract
+near call your-contract.testnet new '{"owner_id": "your-account.testnet"}' --accountId your-account.testnet
+
+2. Set up ClickHouse Database
+
+Install ClickHouse (Ubuntu example)
+sudo apt-get install clickhouse-server clickhouse-client
+
+Start ClickHouse server
+sudo service clickhouse-server start
+
+Create the database schema
+clickhouse-client --multiline 
+CREATE DATABASE IF NOT EXISTS nft_db;
+
+USE nft_db;
+
+-- Create tables as defined in the previous "clickhouse-schema" artifact
+-- (collections, tokens, owner_tokens_mv, merkle_nodes)
+
+
 -- Create the channels table (previously collections)
 CREATE TABLE channels
 (
@@ -49,35 +82,6 @@ CREATE TABLE merkle_nodes
 ENGINE = MergeTree()
 ORDER BY (collection_id, level, node_hash);
 
-# 1. Deploy the Smart Contract
-
-Build the contract
-cargo build --target wasm32-unknown-unknown --release
-
-Deploy the contract
-near deploy --accountId your-contract.testnet --wasmFile target/wasm32-unknown-unknown/release/nft_contract.wasm
-
-Initialize the contract
-near call your-contract.testnet new '{"owner_id": "your-account.testnet"}' --accountId your-account.testnet
-
-2. Set up ClickHouse Database
-
-Install ClickHouse (Ubuntu example)
-sudo apt-get install clickhouse-server clickhouse-client
-
-Start ClickHouse server
-sudo service clickhouse-server start
-
-Create the database schema
-clickhouse-client --multiline <<EOF
-CREATE DATABASE IF NOT EXISTS nft_db;
-
-USE nft_db;
-
--- Create tables as defined in the previous "clickhouse-schema" artifact
--- (collections, tokens, owner_tokens_mv, merkle_nodes)
-
-EOF
 
 3. Set up and Run the Off-Chain Application
 See deploy.md
