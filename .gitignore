@@ -25,7 +25,6 @@ Thumbs.db
 
 # Documentation
 doc/
-*.md
 
 # Testing
 tests/
