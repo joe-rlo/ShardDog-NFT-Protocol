@@ -1,5 +1,5 @@
 const nearAPI = require('near-api-js');
-const { utils, keyStores } = nearAPI;
+const { keyStores } = nearAPI;
 const { MerkleTree } = require('merkletreejs');
 const crypto = require('crypto');
 const db = require('./middle_db');
@@ -40,7 +40,7 @@ class NFTApi {
 
             this.contract = new nearAPI.Contract(this.account, this.contractName, {
                 viewMethods: ['get_channel_info', 'is_minted', 'get_next_token_number'],
-                changeMethods: ['create_channel', 'mint', 'update_merkle_root', 'transfer', 'burn'],
+                changeMethods: ['create_channel', 'nft_mint', 'update_merkle_root', 'nft_transfer', 'nft_burn'],
             });
             console.log('Contract instance created');
         } catch (error) {
@@ -90,19 +90,33 @@ class NFTApi {
         console.log(`Channel ${channelId} created with Merkle root: ${merkleRootHex} and ${initialTokenIds.length} initial tokens`);
     }
 
-    async mintNextToken(channelId) {
+    async mintNextToken(channelId, accountid) {
         console.log(`Attempting to mint next token for channel: ${channelId}`);
     
         try {
             const nextTokenNumber = await this.contract.get_next_token_number({ channel_id: channelId });
             const tokenId = `${channelId}:${nextTokenNumber}`;
     
-            // Get current token IDs and generate the new Merkle root
-            const currentTokenIds = await db.getAllTokenIds(channelId);
-            const allTokenIds = [...currentTokenIds, tokenId];
-            const leaves = allTokenIds.map(id => this.hashFunction(id));
-            const merkleTree = new MerkleTree(leaves, SHA256, { sortPairs: true });
-            const newRoot = merkleTree.getRoot();
+            let proof;
+            let newRoot;
+    
+            if (nextTokenNumber === 1) {
+                console.log(`Minting first token for channel ${channelId}`);
+                proof = null; // No proof for the first token
+                newRoot = this.hashFunction(tokenId);
+            } else {
+                // Get current token IDs and generate the new Merkle root
+                const currentTokenIds = await db.getAllTokenIds(channelId);
+                const allTokenIds = [...currentTokenIds, tokenId];
+                const leaves = allTokenIds.map(id => this.hashFunction(id));
+                const merkleTree = new MerkleTree(leaves, SHA256, { sortPairs: true });
+                newRoot = merkleTree.getRoot();
+    
+                // Generate proof for the new token
+                const leaf = this.hashFunction(tokenId);
+                proof = merkleTree.getProof(leaf);
+                console.log(`Generated Merkle proof: ${JSON.stringify(proof.map(item => item.data.toString('hex')))}`);
+            }
     
             // Update the contract's Merkle root
             await this.contract.update_merkle_root(
@@ -114,19 +128,14 @@ class NFTApi {
             );
             console.log(`Updated contract Merkle root for channel ${channelId}: ${newRoot.toString('hex')}`);
     
-            // Generate proof for the new token
-            const leaf = this.hashFunction(tokenId);
-            const proof = merkleTree.getProof(leaf);
-            console.log(`Generated Merkle proof: ${JSON.stringify(proof.map(item => item.data.toString('hex')))}`);
-    
             // Call the contract's mint method
-            await this.contract.mint(
+            await this.contract.nft_mint(
                 {
                     channel_id: channelId,
-                    proof: proof.map(item => Array.from(item.data)),
+                    proof: proof ? proof.map(item => Array.from(item.data)) : null,
+                    receiver_id: accountid,
                 },
-                300000000000000, // gas
-                utils.format.parseNearAmount("0.1") // deposit (if required)
+                300000000000000
             );
     
             // Update the database
@@ -253,7 +262,7 @@ class NFTApi {
 
         const tokenId = `${channelId}:${tokenNumber}`;
 
-        await this.contract.transfer(
+        await this.contract.nft_transfer(
             {
                 token_id: tokenId,
                 receiver_id: receiverId,
@@ -276,7 +285,7 @@ class NFTApi {
 
         const tokenId = `${channelId}:${tokenNumber}`;
 
-        await this.contract.burn(
+        await this.contract.nft_burn(
             {
                 token_id: tokenId,
             },
@@ -302,10 +311,10 @@ class NFTApi {
     }
 
     calculateNewMerkleRoot(channelInfo, burnedTokenNumber) {
-        // This is a placeholder. You'll need to implement the actual Merkle root recalculation
-        // based on your contract's requirements and the channel's token structure
-        // For now, we'll return a dummy Merkle root
-        return crypto.randomBytes(32).toString('hex');
+        const currentTokenIds = channelInfo.tokenIds.filter(id => !id.endsWith(`:${burnedTokenNumber}`));
+        const leaves = currentTokenIds.map(id => this.hashFunction(id));
+        const merkleTree = new MerkleTree(leaves, SHA256, { sortPairs: true });
+        return merkleTree.getRoot().toString('hex');
     }
     
 }
