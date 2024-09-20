@@ -1,4 +1,6 @@
-# ShardNFTs
+# ShardDog NFT Protocol
+
+[See Blog Post HERE](https://shard.dog/sharddog-protocol)
 
 This NFT contract implements a flexible and efficient system for managing multiple NFT collections (called "channels") using Merkle trees. Here's a high-level overview:
 
