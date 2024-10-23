@@ -1,6 +1,6 @@
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
-use near_sdk::collections::{UnorderedMap, UnorderedSet};
-use near_sdk::{env, near_bindgen, AccountId, PanicOnDefault};
+use near_sdk::collections::{UnorderedMap, UnorderedSet, LookupMap};
+use near_sdk::{env, near_bindgen, AccountId, PanicOnDefault, StorageKey};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::json_types::Base64VecU8;
 use near_sdk::serde_json;
@@ -13,6 +13,7 @@ pub struct Contract {
     pub channels: UnorderedMap<String, Channel>,
     pub minted_tokens: UnorderedSet<TokenId>,
     pub metadata: NFTContractMetadata,
+    pub owners: LookupMap<AccountId, UnorderedSet<TokenId>>,
 }
 
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize)]
@@ -86,6 +87,7 @@ impl Contract {
                 reference: None,
                 reference_hash: None,
             },
+            owners: LookupMap::new(StorageKey::OwnerTokens { account_id: owner_id.clone() }),
         };
 
          // Log contract initialization
@@ -194,6 +196,7 @@ impl Contract {
 
 
     pub fn nft_mint(&mut self, channel_id: String, proof: Option<Vec<Vec<u8>>>, receiver_id: AccountId) -> (TokenId, serde_json::Value) {
+        let owner_id = receiver_id.clone();
         let mut channel = self.channels.get(&channel_id).expect("Channel not found");
         let token_number = channel.next_token_number;
         let token_id = format!("{}:{}", channel_id, token_number);
@@ -240,6 +243,13 @@ impl Contract {
             "EVENT_JSON:{{\"standard\":\"nep171\",\"version\":\"1.0.0\",\"event\":\"nft_mint\",\"data\":[{{\"owner_id\":\"{}\",\"token_ids\":[\"{}\"],\"memo\":null,\"metadata\":{}}}]}}",
             owner_id, token_id, token_metadata.to_string()
         ));
+
+        // Add token to owner's set
+        let mut owner_tokens = self.owners.get(&owner_id).unwrap_or_else(|| {
+            UnorderedSet::new(StorageKey::OwnerTokens { account_id: owner_id.clone() })
+        });
+        owner_tokens.insert(&token_id);
+        self.owners.insert(&owner_id, &owner_tokens);
 
         (token_id, token_metadata)
     }
@@ -290,11 +300,25 @@ impl Contract {
     #[payable]
     pub fn nft_transfer(&mut self, token_id: TokenId, receiver_id: AccountId) {
         let sender_id = env::predecessor_account_id();
-        let (channel_id, _) = token_id.split_once(':').expect("Invalid token ID format");
         
-        assert!(self.minted_tokens.contains(&token_id), "Token does not exist");
-        
-        //Logic is handled off-chain before this is called.
+        // Verify ownership
+        let mut sender_tokens = self.owners.get(&sender_id).expect("Sender has no tokens");
+        assert!(sender_tokens.contains(&token_id), "Sender does not own this token");
+
+        // Remove token from sender
+        sender_tokens.remove(&token_id);
+        if sender_tokens.is_empty() {
+            self.owners.remove(&sender_id);
+        } else {
+            self.owners.insert(&sender_id, &sender_tokens);
+        }
+
+        // Add token to receiver
+        let mut receiver_tokens = self.owners.get(&receiver_id).unwrap_or_else(|| {
+            UnorderedSet::new(StorageKey::OwnerTokens { account_id: receiver_id.clone() })
+        });
+        receiver_tokens.insert(&token_id);
+        self.owners.insert(&receiver_id, &receiver_tokens);
         
         // Log the transfer event
         env::log_str(&format!(
@@ -304,26 +328,51 @@ impl Contract {
     }
 
     #[payable]
-    pub fn nft_burn(&mut self, token_id: TokenId, new_merkle_root: Vec<u8>) {
-        let sender_id = env::predecessor_account_id();
-        let (channel_id, token_number_str) = token_id.split_once(':').expect("Invalid token ID format");
-        let token_number: u64 = token_number_str.parse().expect("Invalid token number");
+    pub fn nft_burn(&mut self, token_id: TokenId) {
+        let owner_id = env::predecessor_account_id();
         
-        assert!(self.minted_tokens.contains(&token_id), "Token does not exist");
-        
-        // Remove the token from minted_tokens
+        // Verify ownership
+        let mut owner_tokens = self.owners.get(&owner_id).expect("Owner has no tokens");
+        assert!(owner_tokens.contains(&token_id), "Sender does not own this token");
+
+        // Remove token from owner
+        owner_tokens.remove(&token_id);
+        if owner_tokens.is_empty() {
+            self.owners.remove(&owner_id);
+        } else {
+            self.owners.insert(&owner_id, &owner_tokens);
+        }
+
+        // Remove from minted_tokens
         self.minted_tokens.remove(&token_id);
-        
-        // Update the channel's total supply and Merkle root
+
+        // Update channel data
+        let (channel_id, _) = token_id.split_once(':').unwrap();
         let mut channel = self.channels.get(&channel_id.to_string()).expect("Channel not found");
         channel.total_supply -= 1;
-        channel.merkle_root = new_merkle_root;
         self.channels.insert(&channel_id.to_string(), &channel);
-        
-        // Log the burn event
+
+        // Emit burn event
         env::log_str(&format!(
             "EVENT_JSON:{{\"standard\":\"nep171\",\"version\":\"1.0.0\",\"event\":\"nft_burn\",\"data\":[{{\"owner_id\":\"{}\",\"token_ids\":[\"{}\"]}}]}}",
-            sender_id, token_id
-    ));
-}
+            owner_id, token_id
+        ));
+    }
+
+    pub fn nft_tokens_for_owner(&self, account_id: AccountId, from_index: Option<U128>, limit: Option<u64>) -> Vec<JsonToken> {
+        let tokens = self.owners.get(&account_id).unwrap_or_else(|| UnorderedSet::new(StorageKey::OwnerTokens { account_id: account_id.clone() }));
+        
+        let start = u128::from(from_index.unwrap_or(U128(0)));
+        tokens.iter()
+            .skip(start as usize)
+            .take(limit.unwrap_or(50) as usize)
+            .map(|token_id| self.nft_token(token_id.clone()).unwrap())
+            .collect()
+    }
+
+    pub fn nft_supply_for_owner(&self, account_id: AccountId) -> U128 {
+        self.owners.get(&account_id)
+            .map(|tokens| U128::from(tokens.len() as u128))
+            .unwrap_or(U128(0))
+    }
 }
