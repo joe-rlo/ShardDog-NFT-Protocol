@@ -1,10 +1,19 @@
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::collections::{UnorderedMap, UnorderedSet, LookupMap};
-use near_sdk::{env, near_bindgen, AccountId, PanicOnDefault, StorageKey};
+use near_sdk::{env, near_bindgen, AccountId, PanicOnDefault, BorshStorageKey};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::json_types::Base64VecU8;
+use near_sdk::json_types::U128;
 use near_sdk::serde_json;
 use std::clone::Clone;
+
+#[derive(BorshStorageKey, BorshSerialize)]
+pub enum StorageKey {
+    MintedTokens,
+    Channels,
+    Owners,
+    OwnerTokens { account_id: AccountId },
+}
 
 #[near_bindgen]
 #[derive(BorshDeserialize, BorshSerialize, PanicOnDefault)]
@@ -370,9 +379,12 @@ impl Contract {
             .collect()
     }
 
-    pub fn nft_supply_for_owner(&self, account_id: AccountId) -> U128 {
-        self.owners.get(&account_id)
-            .map(|tokens| U128::from(tokens.len() as u128))
-            .unwrap_or(U128(0))
+    pub fn nft_supply_for_owner(&self, account_id: AccountId) -> near_sdk::json_types::U128 {
+        near_sdk::json_types::U128(
+            self.owners
+                .get(&account_id)
+                .map(|tokens| tokens.len() as u128)
+                .unwrap_or(0)
+        )
     }
 }
