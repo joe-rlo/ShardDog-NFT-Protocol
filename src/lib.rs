@@ -6,13 +6,19 @@ use near_sdk::json_types::Base64VecU8;
 use near_sdk::json_types::U128;
 use near_sdk::serde_json;
 use std::clone::Clone;
+use near_sdk::{Promise, assert_one_yocto};
+use near_sdk::NearToken;
+
+pub const ONE_YOCTO: NearToken = NearToken::from_yoctonear(1);
 
 #[derive(BorshStorageKey, BorshSerialize)]
 pub enum StorageKey {
-    MintedTokens,
     Channels,
+    TokenIndex,
+    MintedTokens,
     Owners,
     OwnerTokens { account_id: AccountId },
+    ChannelIndex,
 }
 
 #[near_bindgen]
@@ -23,27 +29,50 @@ pub struct Contract {
     pub minted_tokens: UnorderedSet<TokenId>,
     pub metadata: NFTContractMetadata,
     pub owners: LookupMap<AccountId, UnorderedSet<TokenId>>,
+    pub channel_index: UnorderedMap<u16, String>,
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize)]
-#[serde(crate = "near_sdk::serde")]
+#[derive(BorshDeserialize, BorshSerialize)]
 pub struct Channel {
     pub merkle_root: Vec<u8>,
+    pub total_possible: u64,    
+    pub minted_tokens: UnorderedSet<u64>,
     pub total_supply: u64,
     pub next_token_number: u64,
     pub metadata: ChannelMetadata,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(crate = "near_sdk::serde")]
+pub struct ChannelView {
+    pub merkle_root: Vec<u8>,
+    pub total_possible: u64,    
+    pub total_supply: u64,
+    pub next_token_number: u64,
+    pub metadata: ChannelMetadata,
+}
+
+impl From<Channel> for ChannelView {
+    fn from(channel: Channel) -> Self {
+        ChannelView {
+            merkle_root: channel.merkle_root,
+            total_possible: channel.total_possible,
+            total_supply: channel.total_supply,
+            next_token_number: channel.next_token_number,
+            metadata: channel.metadata,
+        }
+    }
+}
+
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Clone)]
 #[serde(crate = "near_sdk::serde")]
 pub struct ChannelMetadata {
-    pub title: String,
-    pub description: String,
+    pub title_template: String,
+    pub description_template: String,
     pub media: String,
     pub animation_url: Option<String>,
     pub reference: String,
     pub reference_hash: Option<Base64VecU8>,
-    
 }
 
 #[derive(Serialize, Deserialize)]
@@ -85,27 +114,21 @@ impl Contract {
     pub fn new(owner_id: AccountId) -> Self {
         let contract = Self {
             owner_id: owner_id.clone(),
-            channels: UnorderedMap::new(b"c"),
-            minted_tokens: UnorderedSet::new(b"m"),
+            channels: UnorderedMap::new(StorageKey::Channels),
+            minted_tokens: UnorderedSet::new(StorageKey::MintedTokens),
             metadata: NFTContractMetadata {
                 spec: "nft-2.1.0".to_string(),
                 name: "ShardDog".to_string(),
                 symbol: "SHARDDOG".to_string(),
-                icon: Some("data:image/png;base64,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".to_string()),
+                icon: Some("https://arweave.net/U8NfqCM4-OIqbCkA8fXT1a5LVkd5eNb1jO5A-8Q4oEY".to_string()),
                 base_uri: None,
                 reference: None,
                 reference_hash: None,
             },
-            owners: LookupMap::new(StorageKey::OwnerTokens { account_id: owner_id.clone() }),
+            owners: LookupMap::new(StorageKey::Owners),
+            channel_index: UnorderedMap::new(StorageKey::ChannelIndex),
         };
-
-         // Log contract initialization
-            env::log_str(&format!(
-                "EVENT_JSON:{{\"standard\":\"nep171\",\"version\":\"1.0.0\",\"event\":\"init\",\"data\":{{\"owner_id\":\"{}\"}}}}",
-                owner_id
-            ));
-
-            contract
+        contract
     }
 
     pub fn nft_metadata(&self) -> NFTContractMetadata {
@@ -116,20 +139,21 @@ impl Contract {
         assert_eq!(env::predecessor_account_id(), self.owner_id, "Only the owner can create channels");
         let channel = Channel {
             merkle_root,
+            total_possible: u64::MAX,    // Set to maximum possible value
+            minted_tokens: UnorderedSet::new(b"m"),
             total_supply: 0,
             next_token_number: 1,
             metadata: ChannelMetadata {
-                title: metadata.title.clone(),
-                description: metadata.description.clone(),
+                title_template: metadata.title_template.clone(),
+                description_template: metadata.description_template.clone(),
                 media: metadata.media.clone(),
                 animation_url: metadata.animation_url.clone(),
                 reference: metadata.reference.clone(),
-                reference_hash: metadata.reference_hash.clone(), // Clone here
+                reference_hash: metadata.reference_hash.clone(),
             },
         };
         self.channels.insert(&channel_id, &channel);
 
-       
         // Log the creation of the new channel
         env::log_str(&format!(
             "EVENT_JSON:{{\"standard\":\"nep171\",\"version\":\"1.0.0\",\"event\":\"create_series\",\"data\":{{\"series_id\":\"{}\",\"metadata\":{}}}}}",
@@ -153,8 +177,8 @@ impl Contract {
         // Update metadata if provided
         if let Some(new_metadata) = metadata {
             channel.metadata = ChannelMetadata {
-                title: new_metadata.title,
-                description: new_metadata.description,
+                title_template: new_metadata.title_template,
+                description_template: new_metadata.description_template,
                 media: new_metadata.media,
                 animation_url: new_metadata.animation_url,
                 reference: new_metadata.reference,
@@ -182,19 +206,15 @@ impl Contract {
         let channel_id = parts[0];
         let token_number: u64 = parts[1].parse().ok()?;
     
-        if !self.minted_tokens.contains(&token_id) {
-            return None;
-        }
-    
         let channel = self.channels.get(&channel_id.to_string())?;
     
         let token_metadata = TokenMetadata {
-            title: format!("{} #{}", channel.metadata.title, token_number),
-            description: channel.metadata.description,
-            media: channel.metadata.media,
-            animation_url: channel.metadata.animation_url,
+            title: channel.metadata.title_template.replace("{}", &token_number.to_string()),
+            description: channel.metadata.description_template.clone(),
+            media: channel.metadata.media.clone(),
+            animation_url: channel.metadata.animation_url.clone(),
             reference: format!("{}/{}", channel.metadata.reference, token_number),
-            reference_hash: channel.metadata.reference_hash,
+            reference_hash: channel.metadata.reference_hash.clone(),
         };
     
         Some(JsonToken {
@@ -204,64 +224,67 @@ impl Contract {
     }
 
 
-    pub fn nft_mint(&mut self, channel_id: String, proof: Option<Vec<Vec<u8>>>, receiver_id: AccountId) -> (TokenId, serde_json::Value) {
-        let owner_id = receiver_id.clone();
+    #[payable]
+    pub fn nft_mint(
+        &mut self,
+        channel_id: String,
+        proof: Option<Vec<Vec<u8>>>,
+        receiver_id: AccountId,
+    ) -> TokenId {
+        let initial_storage = env::storage_usage();
+        
         let mut channel = self.channels.get(&channel_id).expect("Channel not found");
         let token_number = channel.next_token_number;
-        let token_id = format!("{}:{}", channel_id, token_number);
         
-        assert!(!self.minted_tokens.contains(&token_id), "Token already minted");
-    
-        if token_number == 1 {
-            // This is the first token, no proof needed
-            if proof.is_some() {
-                env::panic_str("First token should be minted without a proof");
-            }
-            // Establish the initial Merkle root
-            let initial_root = env::sha256(token_id.as_bytes());
-            channel.merkle_root = initial_root.to_vec();
-        } else {
-            // For subsequent tokens, require and verify the proof
-            let proof = proof.expect("Proof is required for non-first tokens");
+        // Remove total_possible check since we want unlimited minting
+        
+        // Verify proof for non-first tokens
+        if token_number > 1 {
+            let proof = proof.expect("Proof required for minting");
+            let token_id = format!("{}:{}", channel_id, token_number);
             assert!(
                 self.verify_merkle_proof(&channel.merkle_root, &token_id, &proof),
-                "Invalid Merkle proof"
+                "Invalid proof"
             );
         }
-    
-        let owner_id = receiver_id.clone();
-        self.minted_tokens.insert(&token_id);
-    
-        channel.total_supply += 1;
+
+        let token_id = format!("{}:{}", channel_id, token_number);
+        
+        // Update states
+        channel.minted_tokens.insert(&token_number);
         channel.next_token_number += 1;
+        channel.total_supply += 1;
         self.channels.insert(&channel_id, &channel);
-    
-        let token_metadata = serde_json::json!({
-            "title": format!("{} #{}", channel.metadata.title, token_number),
-            "description": channel.metadata.description,
-            "media": channel.metadata.media,
-            "animation_url": channel.metadata.animation_url,
-            "media_hash": null, // Add if you have a media hash
-            "issued_at": env::block_timestamp().to_string(),
-            "reference": channel.metadata.reference,
-            "reference_hash": channel.metadata.reference_hash
-        });
-    
-          // Log the minting event in the standard NEP-171 format
-          env::log_str(&format!(
-            "EVENT_JSON:{{\"standard\":\"nep171\",\"version\":\"1.0.0\",\"event\":\"nft_mint\",\"data\":[{{\"owner_id\":\"{}\",\"token_ids\":[\"{}\"],\"memo\":null,\"metadata\":{}}}]}}",
-            owner_id, token_id, token_metadata.to_string()
+        
+        self.minted_tokens.insert(&token_id);
+        let mut owner_tokens = self.owners
+            .get(&receiver_id)
+            .unwrap_or_else(|| UnorderedSet::new(StorageKey::OwnerTokens {
+                account_id: receiver_id.clone(),
+            }));
+        owner_tokens.insert(&token_id);
+        self.owners.insert(&receiver_id, &owner_tokens);
+
+        // Verify sufficient deposit
+        let required_storage = env::storage_usage() - initial_storage;
+        let required_cost = env::storage_byte_cost().saturating_mul(required_storage as u128);
+        
+        assert!(
+            env::attached_deposit() >= required_cost,
+            "Must attach {} yoctoNEAR to cover storage",
+            required_cost,
+        );
+
+        // Emit NEP-171 event
+        env::log_str(&format!(
+            "EVENT_JSON:{{\"standard\":\"nep171\",\"version\":\"1.0.0\",\"event\":\"nft_mint\",\"data\":[{{\"owner_id\":\"{}\",\"token_ids\":[\"{}\"]}}]}}",
+            receiver_id,
+            token_id
         ));
 
-        // Add token to owner's set
-        let mut owner_tokens = self.owners.get(&owner_id).unwrap_or_else(|| {
-            UnorderedSet::new(StorageKey::OwnerTokens { account_id: owner_id.clone() })
-        });
-        owner_tokens.insert(&token_id);
-        self.owners.insert(&owner_id, &owner_tokens);
-
-        (token_id, token_metadata)
+        token_id
     }
+
 
     pub fn is_minted(&self, token_id: TokenId) -> bool {
         self.minted_tokens.contains(&token_id)
@@ -271,8 +294,8 @@ impl Contract {
         self.channels.get(&channel_id).map(|channel| channel.next_token_number)
     }
 
-    pub fn get_channel_info(&self, channel_id: String) -> Option<Channel> {
-        self.channels.get(&channel_id)
+    pub fn get_channel_info(&self, channel_id: String) -> Option<ChannelView> {
+        self.channels.get(&channel_id).map(|channel| channel.into())
     }
     
 
@@ -283,39 +306,56 @@ impl Contract {
         self.channels.insert(&channel_id, &channel);
     }
 
-    fn verify_merkle_proof(&self, root: &[u8], token_id: &str, proof: &Vec<Vec<u8>>) -> bool {
-        let mut computed_hash = env::sha256(token_id.as_bytes());
-       // env::log_str(&format!("Initial hash: {:?}", computed_hash));
-        
-        for (i, proof_element) in proof.iter().enumerate() {
-            let mut combined = Vec::with_capacity(64);
-            if computed_hash <= *proof_element {
-                combined.extend_from_slice(&computed_hash);
-                combined.extend_from_slice(proof_element);
+    fn verify_merkle_proof(
+        &self,
+        root: &[u8],
+        token_id: &str,
+        proof: &Vec<Vec<u8>>,
+    ) -> bool {
+        let mut hash = env::sha256(token_id.as_bytes());
+        for proof_element in proof {
+            let combined = if hash <= *proof_element {
+                [hash.as_slice(), proof_element].concat()
             } else {
-                combined.extend_from_slice(proof_element);
-                combined.extend_from_slice(&computed_hash);
-            }
-            computed_hash = env::sha256(&combined);
-           // env::log_str(&format!("After step {}: {:?}", i, computed_hash));
+                [proof_element, hash.as_slice()].concat()
+            };
+            hash = env::sha256(&combined);
         }
-        
-        //env::log_str(&format!("Final hash: {:?}", computed_hash));
-        //env::log_str(&format!("Root: {:?}", root));
-        
-        computed_hash == root
+        hash == root
     }
 
     #[payable]
-    pub fn nft_transfer(&mut self, token_id: TokenId, receiver_id: AccountId) {
+    pub fn nft_transfer(
+        &mut self,
+        receiver_id: AccountId,
+        token_id: TokenId,
+        approval_id: Option<u64>,  // Added for NEP-171 compatibility
+        memo: Option<String>       // Added for NEP-171 compatibility
+    ) {
+        assert_one_yocto();  // Require attached deposit of exactly 1 yoctoNEAR
         let sender_id = env::predecessor_account_id();
         
-        // Verify ownership
-        let mut sender_tokens = self.owners.get(&sender_id).expect("Sender has no tokens");
-        assert!(sender_tokens.contains(&token_id), "Sender does not own this token");
+        // Get sender's tokens
+        let mut sender_tokens = self.owners
+            .get(&sender_id)
+            .expect("Sender does not own this token");
+        
+        // Check if sender owns the specific token
+        assert!(
+            sender_tokens.contains(&token_id),
+            "Sender does not own this token"
+        );
+
+        // Prevent transferring to the same account
+        assert_ne!(
+            &sender_id, &receiver_id,
+            "The token owner and the receiver should be different"
+        );
 
         // Remove token from sender
         sender_tokens.remove(&token_id);
+        
+        // Update or remove sender's token set
         if sender_tokens.is_empty() {
             self.owners.remove(&sender_id);
         } else {
@@ -323,16 +363,23 @@ impl Contract {
         }
 
         // Add token to receiver
-        let mut receiver_tokens = self.owners.get(&receiver_id).unwrap_or_else(|| {
-            UnorderedSet::new(StorageKey::OwnerTokens { account_id: receiver_id.clone() })
-        });
+        let mut receiver_tokens = self.owners
+            .get(&receiver_id)
+            .unwrap_or_else(|| UnorderedSet::new(StorageKey::OwnerTokens { 
+                account_id: receiver_id.clone() 
+            }));
+        
         receiver_tokens.insert(&token_id);
         self.owners.insert(&receiver_id, &receiver_tokens);
-        
-        // Log the transfer event
+
+        // Log the transfer with memo if provided
+        let memo_str = memo.unwrap_or_default();
         env::log_str(&format!(
-            "EVENT_JSON:{{\"standard\":\"nep171\",\"version\":\"1.0.0\",\"event\":\"nft_transfer\",\"data\":[{{\"old_owner_id\":\"{}\",\"new_owner_id\":\"{}\",\"token_ids\":[\"{}\"]}}]}}",
-            sender_id, receiver_id, token_id
+            "EVENT_JSON:{{\"standard\":\"nep171\",\"version\":\"1.0.0\",\"event\":\"nft_transfer\",\"data\":[{{\"authorized_id\":null,\"old_owner_id\":\"{}\",\"new_owner_id\":\"{}\",\"token_ids\":[\"{}\"],\"memo\":\"{}\"}}]}}",
+            sender_id,
+            receiver_id,
+            token_id,
+            memo_str
         ));
     }
 
@@ -368,14 +415,27 @@ impl Contract {
         ));
     }
 
-    pub fn nft_tokens_for_owner(&self, account_id: AccountId, from_index: Option<U128>, limit: Option<u64>) -> Vec<JsonToken> {
-        let tokens = self.owners.get(&account_id).unwrap_or_else(|| UnorderedSet::new(StorageKey::OwnerTokens { account_id: account_id.clone() }));
+    pub fn nft_tokens_for_owner(
+        &self,
+        account_id: AccountId,
+        from_index: Option<U128>,
+        limit: Option<u64>
+    ) -> Vec<JsonToken> {
+        // Get the set of tokens for the given account, or create an empty set if none exists
+        let tokens = self.owners.get(&account_id)
+            .unwrap_or_else(|| UnorderedSet::new(StorageKey::OwnerTokens { 
+                account_id: account_id.clone() 
+            }));
         
-        let start = u128::from(from_index.unwrap_or(U128(0)));
+        // Convert from_index from U128 to usize
+        let start = u128::from(from_index.unwrap_or(U128(0))) as usize;
+        let limit = limit.unwrap_or(50) as usize;  // Default limit of 50 tokens
+
+        // Get the tokens with pagination
         tokens.iter()
-            .skip(start as usize)
-            .take(limit.unwrap_or(50) as usize)
-            .map(|token_id| self.nft_token(token_id.clone()).unwrap())
+            .skip(start)
+            .take(limit)
+            .filter_map(|token_id| self.nft_token(token_id.clone()))
             .collect()
     }
 
@@ -386,5 +446,201 @@ impl Contract {
                 .map(|tokens| tokens.len() as u128)
                 .unwrap_or(0)
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use near_sdk::test_utils::{accounts, VMContextBuilder};
+    use near_sdk::{testing_env, AccountId};
+
+    fn get_context(predecessor_account_id: AccountId) -> VMContextBuilder {
+        let mut builder = VMContextBuilder::new();
+        builder
+            .current_account_id(accounts(0))
+            .signer_account_id(predecessor_account_id.clone())
+            .predecessor_account_id(predecessor_account_id);
+        builder
+    }
+
+    #[test]
+    fn test_new() {
+        let context = get_context(accounts(1));
+        testing_env!(context.build());
+        let contract = Contract::new(accounts(1));
+        assert_eq!(contract.owner_id, accounts(1));
+    }
+
+    #[test]
+    fn test_create_channel() {
+        let mut context = get_context(accounts(1));
+        testing_env!(context.build());
+        let mut contract = Contract::new(accounts(1));
+
+        let metadata = ChannelMetadata {
+            title_template: "Test Channel #{}".to_string(),
+            description_template: "Test Description".to_string(),
+            media: "https://example.com/image.jpg".to_string(),
+            animation_url: None,
+            reference: "https://example.com/ref".to_string(),
+            reference_hash: None,
+        };
+
+        contract.create_channel(
+            "test_channel".to_string(),
+            vec![1, 2, 3],  // Example merkle root
+            metadata.clone()
+        );
+
+        let channel = contract.get_channel_info("test_channel".to_string()).unwrap();
+        assert_eq!(channel.total_supply, 0);
+        assert_eq!(channel.next_token_number, 1);
+        assert_eq!(channel.metadata.title_template, "Test Channel #{}");
+    }
+
+    #[test]
+    fn test_mint_and_transfer() {
+        let mut context = get_context(accounts(1));
+        testing_env!(context.build());
+        let mut contract = Contract::new(accounts(1));
+
+        // Create channel
+        let metadata = ChannelMetadata {
+            title_template: "Test Channel #{}".to_string(),
+            description_template: "Test Description".to_string(),
+            media: "https://example.com/image.jpg".to_string(),
+            animation_url: None,
+            reference: "https://example.com/ref".to_string(),
+            reference_hash: None,
+        };
+
+        contract.create_channel(
+            "test_channel".to_string(),
+            vec![1, 2, 3],
+            metadata
+        );
+
+        // Mint token
+        let (token_id, _) = contract.nft_mint(
+            "test_channel".to_string(),
+            None,  // First token doesn't need proof
+            accounts(2)
+        );
+
+        // Check ownership
+        let owner_tokens = contract.nft_tokens_for_owner(accounts(2), None, None);
+        assert_eq!(owner_tokens.len(), 1);
+        assert_eq!(owner_tokens[0].token_id, token_id);
+
+        // Transfer token
+        testing_env!(context
+            .predecessor_account_id(accounts(2))
+            .build());
+        contract.nft_transfer(token_id.clone(), accounts(3));
+
+        // Check new ownership
+        let new_owner_tokens = contract.nft_tokens_for_owner(accounts(3), None, None);
+        assert_eq!(new_owner_tokens.len(), 1);
+        assert_eq!(new_owner_tokens[0].token_id, token_id);
+    }
+
+    #[test]
+    fn test_burn() {
+        let mut context = get_context(accounts(1));
+        testing_env!(context.build());
+        let mut contract = Contract::new(accounts(1));
+
+        // Create channel and mint token
+        let metadata = ChannelMetadata {
+            title_template: "Test Channel #{}".to_string(),
+            description_template: "Test Description".to_string(),
+            media: "https://example.com/image.jpg".to_string(),
+            animation_url: None,
+            reference: "https://example.com/ref".to_string(),
+            reference_hash: None,
+        };
+
+        contract.create_channel(
+            "test_channel".to_string(),
+            vec![1, 2, 3],
+            metadata
+        );
+
+        let (token_id, _) = contract.nft_mint(
+            "test_channel".to_string(),
+            None,
+            accounts(2)
+        );
+
+        // Burn token
+        testing_env!(context
+            .predecessor_account_id(accounts(2))
+            .build());
+        contract.nft_burn(token_id.clone());
+
+        // Verify token is burned
+        assert!(!contract.is_minted(token_id));
+        let owner_tokens = contract.nft_tokens_for_owner(accounts(2), None, None);
+        assert_eq!(owner_tokens.len(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Only the owner can create channels")]
+    fn test_create_channel_not_owner() {
+        let mut context = get_context(accounts(2));
+        testing_env!(context.build());
+        let mut contract = Contract::new(accounts(1));
+
+        let metadata = ChannelMetadata {
+            title_template: "Test Channel #{}".to_string(),
+            description_template: "Test Description".to_string(),
+            media: "https://example.com/image.jpg".to_string(),
+            animation_url: None,
+            reference: "https://example.com/ref".to_string(),
+            reference_hash: None,
+        };
+
+        contract.create_channel(
+            "test_channel".to_string(),
+            vec![1, 2, 3],
+            metadata
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Sender does not own this token")]
+    fn test_transfer_not_owner() {
+        let mut context = get_context(accounts(1));
+        testing_env!(context.build());
+        let mut contract = Contract::new(accounts(1));
+
+        // Create channel and mint token
+        let metadata = ChannelMetadata {
+            title_template: "Test Channel #{}".to_string(),
+            description_template: "Test Description".to_string(),
+            media: "https://example.com/image.jpg".to_string(),
+            animation_url: None,
+            reference: "https://example.com/ref".to_string(),
+            reference_hash: None,
+        };
+
+        contract.create_channel(
+            "test_channel".to_string(),
+            vec![1, 2, 3],
+            metadata
+        );
+
+        let (token_id, _) = contract.nft_mint(
+            "test_channel".to_string(),
+            None,
+            accounts(2)
+        );
+
+        // Try to transfer token from wrong account
+        testing_env!(context
+            .predecessor_account_id(accounts(3))
+            .build());
+        contract.nft_transfer(token_id, accounts(4));
     }
 }

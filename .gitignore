@@ -30,6 +30,7 @@ doc/
 tests/
 *.test
 *.spec
+tests/config.ts
 
 # Miscellaneous
 *.bak

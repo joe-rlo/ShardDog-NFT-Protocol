@@ -109,7 +109,7 @@ Deploy the contract
 near deploy --accountId your-contract.testnet --wasmFile target/wasm32-unknown-unknown/release/nft_contract.wasm
 
 Initialize the contract
-near call your-contract.testnet new '{"owner_id": "your-account.testnet"}' --accountId your-account.testnet
+near call your-contract.testnet new '{"owner_id": "sharddog.near"}' --accountId your-account.testnet
 
 ## Set up ClickHouse Database
 
