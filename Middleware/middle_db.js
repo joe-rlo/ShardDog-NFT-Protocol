@@ -1,4 +1,5 @@
 const { createClient } = require('@clickhouse/client');
+const { v4: uuidv4 } = require('uuid');
 
 const client = createClient({
   host: process.env.CLICKHOUSE_HOST,
@@ -7,30 +8,57 @@ const client = createClient({
   password: process.env.CLICKHOUSE_PASSWORD,
 });
 
-async function createChannel(channelId, merkleRoot, initialTokenIds) {
-    const initialTokenIdsJson = JSON.stringify(initialTokenIds);
-    console.log(`Attempting to create channel with ID: ${channelId}`);
-    console.log(`Merkle root: ${merkleRoot}`);
-    console.log(`Initial token IDs: ${initialTokenIdsJson}`);
+async function createChannel(channelData) {
+    console.log(`Creating channel with slug: ${channelData.slug}`);
     
     const query = `
       INSERT INTO collections (collection_id, merkle_root, total_supply, next_token_number, initial_token_ids)
-      VALUES ('${channelId}', '${merkleRoot}', 0, 1, '${initialTokenIdsJson}')
+      VALUES ('${channelData.collection_id}', '${channelData.merkle_root}', 0, 1, '${channelData.initial_token_ids}')
     `;
     
-    console.log(`Executing query: ${query}`);
+    const channelQuery = `
+        INSERT INTO channels (
+            series_id,
+            slug,
+            title,
+            description,
+            media,
+            image,
+            backgroundImage,
+            reference,
+            wallet,
+            contract,
+            redirecturl,
+            endpoint,
+            successpage
+        )
+        VALUES (
+            ${channelData.series_id},
+            '${channelData.slug}',
+            '${channelData.title}',
+            '${channelData.description}',
+            '${channelData.media}',
+            '${channelData.image || channelData.media}',
+            '${channelData.backgroundImage || ''}',
+            '${channelData.reference}',
+            '${channelData.wallet}',
+            '${channelData.contract || 'mint.sharddog.near'}',
+            '${channelData.redirecturl || ''}',
+            '${channelData.endpoint || 'check-slugs-2'}',
+            '${channelData.successpage || ''}'
+        )
+    `;
     
     try {
-      const result = await client.command({
-        query: query,
-      });
-      console.log(`Query executed successfully. Result:`, result);
-      return result;
+        await client.command({ query });
+        await client.command({ query: channelQuery });
+        console.log(`Channel created successfully in both databases`);
+        return true;
     } catch (error) {
-      console.error(`Error executing query:`, error);
-      throw error;
+        console.error(`Error creating channel:`, error);
+        throw error;
     }
-  }
+}
 
 async function getChannelInfo(channelId) {
   const query = `SELECT * FROM collections WHERE collection_id = '${channelId}'`;
@@ -75,24 +103,49 @@ async function getInitialTokenIds(channelId) {
     return tokenIds;
 }
 
-async function mintToken(channelId, tokenNumber, ownerId) {
-  const tokenId = `${channelId}:${tokenNumber}`;
-  const query = `
-    INSERT INTO tokens (token_id, collection_id, owner_id)
-    VALUES ('${tokenId}', '${channelId}', '${ownerId}')
-  `;
-  await client.command({
-    query: query,
-  });
+async function mintToken(channelId, tokenNumber, ownerId, ipAddress = '', fingerprint = '') {
+    const tokenId = `${channelId}:${tokenNumber}`;
+    
+    const query = `
+        INSERT INTO tokens (token_id, collection_id, owner_id)
+        VALUES ('${tokenId}', '${channelId}', '${ownerId}')
+    `;
 
-  const updateQuery = `
-    ALTER TABLE collections
-    UPDATE total_supply = total_supply + 1, next_token_number = next_token_number + 1
-    WHERE collection_id = '${channelId}'
-  `;
-  await client.command({
-    query: updateQuery,
-  });
+    const claimQuery = `
+        INSERT INTO claims (
+            claim_id,
+            wallet,
+            series_id,
+            contract,
+            ip,
+            fingerprint,
+            timestamp
+        )
+        VALUES (
+            '${uuidv4()}',
+            '${ownerId}',
+            ${channelId},
+            'mint.sharddog.near',
+            '${ipAddress}',
+            '${fingerprint}',
+            now()
+        )
+    `;
+
+    try {
+        await client.command({ query });
+        await client.command({ query: claimQuery });
+        
+        const updateQuery = `
+            ALTER TABLE collections
+            UPDATE total_supply = total_supply + 1, next_token_number = next_token_number + 1
+            WHERE collection_id = '${channelId}'
+        `;
+        await client.command({ query: updateQuery });
+    } catch (error) {
+        console.error(`Error minting token:`, error);
+        throw error;
+    }
 }
 
 async function getTokenOwner(channelId, tokenNumber) {
