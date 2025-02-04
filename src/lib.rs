@@ -36,7 +36,6 @@ pub struct Contract {
 pub struct Channel {
     pub merkle_root: Vec<u8>,
     pub total_possible: u64,    
-    pub minted_tokens: UnorderedSet<u64>,
     pub total_supply: u64,
     pub next_token_number: u64,
     pub metadata: ChannelMetadata,
@@ -140,7 +139,6 @@ impl Contract {
         let channel = Channel {
             merkle_root,
             total_possible: u64::MAX,    // Set to maximum possible value
-            minted_tokens: UnorderedSet::new(b"m"),
             total_supply: 0,
             next_token_number: 1,
             metadata: ChannelMetadata {
@@ -236,8 +234,6 @@ impl Contract {
         let mut channel = self.channels.get(&channel_id).expect("Channel not found");
         let token_number = channel.next_token_number;
         
-        // Remove total_possible check since we want unlimited minting
-        
         // Verify proof for non-first tokens
         if token_number > 1 {
             let proof = proof.expect("Proof required for minting");
@@ -250,13 +246,17 @@ impl Contract {
 
         let token_id = format!("{}:{}", channel_id, token_number);
         
-        // Update states
-        channel.minted_tokens.insert(&token_number);
+        // Optimize storage: Only store minimal required data
+        // 1. Update channel state with just the counter
         channel.next_token_number += 1;
         channel.total_supply += 1;
+        // Remove storing individual token numbers in channel
         self.channels.insert(&channel_id, &channel);
         
+        // 2. Store minimal token data
         self.minted_tokens.insert(&token_id);
+
+        // 3. Optimize owner token storage
         let mut owner_tokens = self.owners
             .get(&receiver_id)
             .unwrap_or_else(|| UnorderedSet::new(StorageKey::OwnerTokens {
@@ -265,7 +265,7 @@ impl Contract {
         owner_tokens.insert(&token_id);
         self.owners.insert(&receiver_id, &owner_tokens);
 
-        // Verify sufficient deposit
+        // Calculate and verify storage cost
         let required_storage = env::storage_usage() - initial_storage;
         let required_cost = env::storage_byte_cost().saturating_mul(required_storage as u128);
         
