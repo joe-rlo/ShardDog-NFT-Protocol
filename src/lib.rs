@@ -1,5 +1,5 @@
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
-use near_sdk::collections::{UnorderedMap, UnorderedSet, LookupMap};
+use near_sdk::collections::{UnorderedMap, UnorderedSet, LookupMap, LookupSet};
 use near_sdk::{env, near_bindgen, AccountId, PanicOnDefault, BorshStorageKey};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::json_types::Base64VecU8;
@@ -8,17 +8,68 @@ use near_sdk::serde_json;
 use std::clone::Clone;
 use near_sdk::{Promise, assert_one_yocto};
 use near_sdk::NearToken;
+use borsh::to_vec;
 
 pub const ONE_YOCTO: NearToken = NearToken::from_yoctonear(1);
 
-#[derive(BorshStorageKey, BorshSerialize)]
+#[derive(BorshStorageKey, BorshSerialize, BorshDeserialize)]
+#[derive(Debug)]
 pub enum StorageKey {
     Channels,
     TokenIndex,
     MintedTokens,
     Owners,
     OwnerTokens { account_id: AccountId },
+    ChannelTokens { account_id: AccountId },
     ChannelIndex,
+}
+
+#[derive(BorshDeserialize, BorshSerialize)]
+pub struct OwnerChannels {
+    pub channels: UnorderedSet<String>,
+}
+
+impl OwnerChannels {
+    pub fn new(prefix: Vec<u8>) -> Self {
+        Self {
+            channels: UnorderedSet::new(prefix),
+        }
+    }
+
+    pub fn add_channel(&mut self, channel_id: &String) {
+        self.channels.insert(channel_id);
+    }
+
+    pub fn has_channel(&self, channel_id: &String) -> bool {
+        self.channels.contains(channel_id)
+    }
+
+    pub fn remove_channel(&mut self, channel_id: &String) -> bool {
+        self.channels.remove(channel_id)
+    }
+
+    pub fn get_all_tokens(&self) -> Vec<String> {
+        self.channels.iter()
+            .map(|channel_id| format!("{}:{}", channel_id, 1))
+            .collect()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.channels.is_empty()
+    }
+
+    pub fn token_count(&self) -> u64 {
+        self.channels.len() as u64
+    }
+
+    pub fn parse_token_id(token_id: &str) -> Option<(String, u64)> {
+        let parts: Vec<&str> = token_id.split(':').collect();
+        if parts.len() != 2 {
+            return None;
+        }
+        let token_number = parts[1].parse().ok()?;
+        Some((parts[0].to_string(), token_number))
+    }
 }
 
 #[near_bindgen]
@@ -26,9 +77,9 @@ pub enum StorageKey {
 pub struct Contract {
     pub owner_id: AccountId,
     pub channels: UnorderedMap<String, Channel>,
-    pub minted_tokens: UnorderedSet<TokenId>,
+    pub minted_tokens: LookupSet<TokenId>,
     pub metadata: NFTContractMetadata,
-    pub owners: LookupMap<AccountId, UnorderedSet<TokenId>>,
+    pub owners: LookupMap<AccountId, OwnerChannels>,
     pub channel_index: UnorderedMap<u16, String>,
 }
 
@@ -111,10 +162,10 @@ pub type TokenId = String; // Format: "{channel_id}:{token_number}"
 impl Contract {
     #[init]
     pub fn new(owner_id: AccountId) -> Self {
-        let contract = Self {
-            owner_id: owner_id.clone(),
+        Self {
+            owner_id,
             channels: UnorderedMap::new(StorageKey::Channels),
-            minted_tokens: UnorderedSet::new(StorageKey::MintedTokens),
+            minted_tokens: LookupSet::new(StorageKey::MintedTokens),
             metadata: NFTContractMetadata {
                 spec: "nft-2.1.0".to_string(),
                 name: "ShardDog".to_string(),
@@ -126,8 +177,7 @@ impl Contract {
             },
             owners: LookupMap::new(StorageKey::Owners),
             channel_index: UnorderedMap::new(StorageKey::ChannelIndex),
-        };
-        contract
+        }
     }
 
     pub fn nft_metadata(&self) -> NFTContractMetadata {
@@ -246,27 +296,41 @@ impl Contract {
 
         let token_id = format!("{}:{}", channel_id, token_number);
         
-        // Optimize storage: Only store minimal required data
-        // 1. Update channel state with just the counter
+        let storage_before_channel = env::storage_usage();
+        
+        // Update channel state
         channel.next_token_number += 1;
         channel.total_supply += 1;
-        // Remove storing individual token numbers in channel
         self.channels.insert(&channel_id, &channel);
         
-        // 2. Store minimal token data
+        let storage_before_token = env::storage_usage();
+        // Store token data
         self.minted_tokens.insert(&token_id);
-
-        // 3. Optimize owner token storage
-        let mut owner_tokens = self.owners
+        
+        let storage_before_owner = env::storage_usage();
+        // Update owner data with simplified structure
+        let mut owner_channels = self.owners
             .get(&receiver_id)
-            .unwrap_or_else(|| UnorderedSet::new(StorageKey::OwnerTokens {
-                account_id: receiver_id.clone(),
-            }));
-        owner_tokens.insert(&token_id);
-        self.owners.insert(&receiver_id, &owner_tokens);
+            .unwrap_or_else(|| OwnerChannels::new(
+                to_vec(&StorageKey::OwnerTokens { 
+                    account_id: receiver_id.clone() 
+                }).expect("Failed to serialize StorageKey")
+            ));
+        
+        owner_channels.add_channel(&channel_id);
+        self.owners.insert(&receiver_id, &owner_channels);
 
-        // Calculate and verify storage cost
-        let required_storage = env::storage_usage() - initial_storage;
+        let final_storage = env::storage_usage();
+        
+        env::log_str(&format!(
+            "Storage usage: Channel: {} bytes, Token: {} bytes, Owner: {} bytes, Total: {} bytes",
+            storage_before_token - storage_before_channel,
+            storage_before_owner - storage_before_token,
+            final_storage - storage_before_owner,
+            final_storage - initial_storage
+        ));
+
+        let required_storage = final_storage - initial_storage;
         let required_cost = env::storage_byte_cost().saturating_mul(required_storage as u128);
         
         assert!(
@@ -329,20 +393,23 @@ impl Contract {
         &mut self,
         receiver_id: AccountId,
         token_id: TokenId,
-        approval_id: Option<u64>,  // Added for NEP-171 compatibility
-        memo: Option<String>       // Added for NEP-171 compatibility
+        approval_id: Option<u64>,
+        memo: Option<String>
     ) {
-        assert_one_yocto();  // Require attached deposit of exactly 1 yoctoNEAR
+        assert_one_yocto();
         let sender_id = env::predecessor_account_id();
         
+        let (channel_id, _) = OwnerChannels::parse_token_id(&token_id)
+            .expect("Invalid token ID format");
+
         // Get sender's tokens
         let mut sender_tokens = self.owners
             .get(&sender_id)
-            .expect("Sender does not own this token");
+            .expect("Sender does not own any tokens");
         
-        // Check if sender owns the specific token
+        // Verify ownership
         assert!(
-            sender_tokens.contains(&token_id),
+            sender_tokens.has_channel(&channel_id),
             "Sender does not own this token"
         );
 
@@ -353,7 +420,7 @@ impl Contract {
         );
 
         // Remove token from sender
-        sender_tokens.remove(&token_id);
+        sender_tokens.remove_channel(&channel_id);
         
         // Update or remove sender's token set
         if sender_tokens.is_empty() {
@@ -365,14 +432,16 @@ impl Contract {
         // Add token to receiver
         let mut receiver_tokens = self.owners
             .get(&receiver_id)
-            .unwrap_or_else(|| UnorderedSet::new(StorageKey::OwnerTokens { 
-                account_id: receiver_id.clone() 
-            }));
+            .unwrap_or_else(|| OwnerChannels::new(
+                to_vec(&StorageKey::OwnerTokens { 
+                    account_id: receiver_id.clone() 
+                }).expect("Failed to serialize StorageKey")
+            ));
         
-        receiver_tokens.insert(&token_id);
+        receiver_tokens.add_channel(&channel_id);
         self.owners.insert(&receiver_id, &receiver_tokens);
 
-        // Log the transfer with memo if provided
+        // Log the transfer
         let memo_str = memo.unwrap_or_default();
         env::log_str(&format!(
             "EVENT_JSON:{{\"standard\":\"nep171\",\"version\":\"1.0.0\",\"event\":\"nft_transfer\",\"data\":[{{\"authorized_id\":null,\"old_owner_id\":\"{}\",\"new_owner_id\":\"{}\",\"token_ids\":[\"{}\"],\"memo\":\"{}\"}}]}}",
@@ -387,12 +456,18 @@ impl Contract {
     pub fn nft_burn(&mut self, token_id: TokenId) {
         let owner_id = env::predecessor_account_id();
         
+        let (channel_id, _) = OwnerChannels::parse_token_id(&token_id)
+            .expect("Invalid token ID format");
+
         // Verify ownership
         let mut owner_tokens = self.owners.get(&owner_id).expect("Owner has no tokens");
-        assert!(owner_tokens.contains(&token_id), "Sender does not own this token");
+        assert!(
+            owner_tokens.has_channel(&channel_id),
+            "Sender does not own this token"
+        );
 
         // Remove token from owner
-        owner_tokens.remove(&token_id);
+        owner_tokens.remove_channel(&channel_id);
         if owner_tokens.is_empty() {
             self.owners.remove(&owner_id);
         } else {
@@ -403,15 +478,15 @@ impl Contract {
         self.minted_tokens.remove(&token_id);
 
         // Update channel data
-        let (channel_id, _) = token_id.split_once(':').unwrap();
-        let mut channel = self.channels.get(&channel_id.to_string()).expect("Channel not found");
+        let mut channel = self.channels.get(&channel_id).expect("Channel not found");
         channel.total_supply -= 1;
-        self.channels.insert(&channel_id.to_string(), &channel);
+        self.channels.insert(&channel_id, &channel);
 
         // Emit burn event
         env::log_str(&format!(
             "EVENT_JSON:{{\"standard\":\"nep171\",\"version\":\"1.0.0\",\"event\":\"nft_burn\",\"data\":[{{\"owner_id\":\"{}\",\"token_ids\":[\"{}\"]}}]}}",
-            owner_id, token_id
+            owner_id,
+            token_id
         ));
     }
 
@@ -421,31 +496,27 @@ impl Contract {
         from_index: Option<U128>,
         limit: Option<u64>
     ) -> Vec<JsonToken> {
-        // Get the set of tokens for the given account, or create an empty set if none exists
-        let tokens = self.owners.get(&account_id)
-            .unwrap_or_else(|| UnorderedSet::new(StorageKey::OwnerTokens { 
-                account_id: account_id.clone() 
-            }));
-        
-        // Convert from_index from U128 to usize
-        let start = u128::from(from_index.unwrap_or(U128(0))) as usize;
-        let limit = limit.unwrap_or(50) as usize;  // Default limit of 50 tokens
-
-        // Get the tokens with pagination
-        tokens.iter()
-            .skip(start)
-            .take(limit)
-            .filter_map(|token_id| self.nft_token(token_id.clone()))
-            .collect()
+        if let Some(owner_tokens) = self.owners.get(&account_id) {
+            let start = u128::from(from_index.unwrap_or(U128(0))) as usize;
+            let limit = limit.unwrap_or(50) as usize;
+            
+            owner_tokens.get_all_tokens()
+                .into_iter()
+                .skip(start)
+                .take(limit)
+                .filter_map(|token_id| self.nft_token(token_id))
+                .collect()
+        } else {
+            vec![]
+        }
     }
 
-    pub fn nft_supply_for_owner(&self, account_id: AccountId) -> near_sdk::json_types::U128 {
-        near_sdk::json_types::U128(
-            self.owners
-                .get(&account_id)
-                .map(|tokens| tokens.len() as u128)
-                .unwrap_or(0)
-        )
+    pub fn nft_supply_for_owner(&self, account_id: AccountId) -> U128 {
+        self.owners
+            .get(&account_id)
+            .map(|tokens| tokens.token_count() as u128)
+            .unwrap_or(0)
+            .into()
     }
 }
 
