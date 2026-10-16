@@ -1,7 +1,7 @@
 [package]
 name = "shard_nfts"
 description = "compressed NFTs"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 # TODO: Fill out the repository field to help NEAR ecosystem tools to discover your project.
 # NEP-0330 is automatically implemented for all contracts built with https://github.com/near/cargo-near.
@@ -13,15 +13,13 @@ crate-type = ["cdylib", "rlib"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [dependencies]
-near-sdk = { version = "5.4.0", features = ["legacy"]}
+near-sdk = { version = "=5.4.0", features = ["legacy"]}
 time = "0.3.35"
+# The borsh derives look the crate up by name
+borsh = { version = "1.5.1", features = ["derive"] }
 
 [dev-dependencies]
-near-sdk = { version = "5.0.0", features = ["unit-testing","legacy"]}
-near-workspaces = { version = "0.10.0", features = ["unstable"] }
-tokio = { version = "1.12.0", features = ["full"] }
-serde_json = "1"
-borsh = "1.5.1"
+near-sdk = { version = "=5.4.0", features = ["unit-testing","legacy"]}
 
 [profile.release]
 codegen-units = 1
