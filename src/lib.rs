@@ -290,6 +290,15 @@ impl Contract {
         channel_id: String,
         proof: Option<Vec<Vec<u8>>>,
     ) -> u64 {
+        // Only the owner (the ShardDog platform) mints. Claim rules such as
+        // invite-only, expiry and one-per-wallet are enforced off-chain, so an
+        // open mint would let anyone bypass them and burn a drop's paid mints.
+        assert_eq!(
+            env::predecessor_account_id(),
+            self.owner_id,
+            "Only the owner can mint"
+        );
+
         let initial_storage = env::storage_usage();
         
         let mut channel = self.channels.get(&channel_id).expect("Channel not found");
@@ -508,8 +517,29 @@ mod tests {
         builder
             .current_account_id(accounts(0))
             .signer_account_id(predecessor_account_id.clone())
-            .predecessor_account_id(predecessor_account_id);
+            .predecessor_account_id(predecessor_account_id)
+            .attached_deposit(NearToken::from_millinear(10));
         builder
+    }
+
+    fn metadata() -> ChannelMetadata {
+        ChannelMetadata {
+            title_template: "Test Channel #{}".to_string(),
+            description_template: "Test Description".to_string(),
+            media: "https://example.com/image.jpg".to_string(),
+            animation_url: None,
+            reference: "https://example.com/ref".to_string(),
+            reference_hash: None,
+        }
+    }
+
+    /// Contract owned by accounts(1) with one channel, as accounts(1).
+    fn setup() -> (VMContextBuilder, Contract) {
+        let context = get_context(accounts(1));
+        testing_env!(context.build());
+        let mut contract = Contract::new(accounts(1));
+        contract.create_channel("test_channel".to_string(), vec![1, 2, 3], metadata());
+        (context, contract)
     }
 
     #[test]
@@ -522,25 +552,7 @@ mod tests {
 
     #[test]
     fn test_create_channel() {
-        let mut context = get_context(accounts(1));
-        testing_env!(context.build());
-        let mut contract = Contract::new(accounts(1));
-
-        let metadata = ChannelMetadata {
-            title_template: "Test Channel #{}".to_string(),
-            description_template: "Test Description".to_string(),
-            media: "https://example.com/image.jpg".to_string(),
-            animation_url: None,
-            reference: "https://example.com/ref".to_string(),
-            reference_hash: None,
-        };
-
-        contract.create_channel(
-            "test_channel".to_string(),
-            vec![1, 2, 3],  // Example merkle root
-            metadata.clone()
-        );
-
+        let (_, contract) = setup();
         let channel = contract.get_channel_info("test_channel".to_string()).unwrap();
         assert_eq!(channel.total_supply, 0);
         assert_eq!(channel.next_token_number, 1);
@@ -549,45 +561,21 @@ mod tests {
 
     #[test]
     fn test_mint_and_transfer() {
-        let mut context = get_context(accounts(1));
-        testing_env!(context.build());
-        let mut contract = Contract::new(accounts(1));
+        let (mut context, mut contract) = setup();
 
-        // Create channel
-        let metadata = ChannelMetadata {
-            title_template: "Test Channel #{}".to_string(),
-            description_template: "Test Description".to_string(),
-            media: "https://example.com/image.jpg".to_string(),
-            animation_url: None,
-            reference: "https://example.com/ref".to_string(),
-            reference_hash: None,
-        };
+        // The first token of a channel doesn't need a proof
+        let token_id = contract.nft_mint(accounts(2), "test_channel".to_string(), None);
 
-        contract.create_channel(
-            "test_channel".to_string(),
-            vec![1, 2, 3],
-            metadata
-        );
-
-        // Mint token
-        let (token_id, _) = contract.nft_mint(
-            "test_channel".to_string(),
-            None,  // First token doesn't need proof
-            accounts(2)
-        );
-
-        // Check ownership
         let owner_tokens = contract.nft_tokens_for_owner(accounts(2), None, None);
         assert_eq!(owner_tokens.len(), 1);
         assert_eq!(owner_tokens[0].token_id, token_id.to_string());
 
-        // Transfer token
         testing_env!(context
             .predecessor_account_id(accounts(2))
+            .attached_deposit(NearToken::from_yoctonear(1))
             .build());
-        contract.nft_transfer(token_id.clone(), accounts(3));
+        contract.nft_transfer(accounts(3), token_id.to_string(), None, None);
 
-        // Check new ownership
         let new_owner_tokens = contract.nft_tokens_for_owner(accounts(3), None, None);
         assert_eq!(new_owner_tokens.len(), 1);
         assert_eq!(new_owner_tokens[0].token_id, token_id.to_string());
@@ -595,100 +583,54 @@ mod tests {
 
     #[test]
     fn test_burn() {
-        let mut context = get_context(accounts(1));
-        testing_env!(context.build());
-        let mut contract = Contract::new(accounts(1));
+        let (mut context, mut contract) = setup();
+        let token_id = contract.nft_mint(accounts(2), "test_channel".to_string(), None);
 
-        // Create channel and mint token
-        let metadata = ChannelMetadata {
-            title_template: "Test Channel #{}".to_string(),
-            description_template: "Test Description".to_string(),
-            media: "https://example.com/image.jpg".to_string(),
-            animation_url: None,
-            reference: "https://example.com/ref".to_string(),
-            reference_hash: None,
-        };
-
-        contract.create_channel(
-            "test_channel".to_string(),
-            vec![1, 2, 3],
-            metadata
-        );
-
-        let (token_id, _) = contract.nft_mint(
-            "test_channel".to_string(),
-            None,
-            accounts(2)
-        );
-
-        // Burn token
         testing_env!(context
             .predecessor_account_id(accounts(2))
+            .attached_deposit(NearToken::from_yoctonear(1))
             .build());
-        contract.nft_burn(token_id.clone());
+        contract.nft_burn(token_id.to_string());
 
-        // Verify token is burned
         assert!(!contract.is_minted(token_id));
-        let owner_tokens = contract.nft_tokens_for_owner(accounts(2), None, None);
-        assert_eq!(owner_tokens.len(), 0);
+        assert_eq!(contract.nft_tokens_for_owner(accounts(2), None, None).len(), 0);
     }
 
     #[test]
-    #[should_panic(expected = "Only the owner can create channels")]
+    #[should_panic(expected = "Only owner can create channels")]
     fn test_create_channel_not_owner() {
-        let mut context = get_context(accounts(2));
+        let context = get_context(accounts(2));
         testing_env!(context.build());
         let mut contract = Contract::new(accounts(1));
-
-        let metadata = ChannelMetadata {
-            title_template: "Test Channel #{}".to_string(),
-            description_template: "Test Description".to_string(),
-            media: "https://example.com/image.jpg".to_string(),
-            animation_url: None,
-            reference: "https://example.com/ref".to_string(),
-            reference_hash: None,
-        };
-
-        contract.create_channel(
-            "test_channel".to_string(),
-            vec![1, 2, 3],
-            metadata
-        );
+        contract.create_channel("test_channel".to_string(), vec![1, 2, 3], metadata());
     }
 
     #[test]
-    #[should_panic(expected = "Sender does not own this token")]
+    #[should_panic(expected = "Only the owner can mint")]
+    fn test_mint_not_owner() {
+        let (mut context, mut contract) = setup();
+        // A stranger minting to themselves, even the proof-free first token
+        testing_env!(context.predecessor_account_id(accounts(2)).build());
+        contract.nft_mint(accounts(2), "test_channel".to_string(), None);
+    }
+
+    #[test]
+    fn test_owner_mints_to_others() {
+        let (_, mut contract) = setup();
+        contract.nft_mint(accounts(3), "test_channel".to_string(), None);
+        assert_eq!(contract.nft_tokens_for_owner(accounts(3), None, None).len(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "Sender must own token")]
     fn test_transfer_not_owner() {
-        let mut context = get_context(accounts(1));
-        testing_env!(context.build());
-        let mut contract = Contract::new(accounts(1));
+        let (mut context, mut contract) = setup();
+        let token_id = contract.nft_mint(accounts(2), "test_channel".to_string(), None);
 
-        // Create channel and mint token
-        let metadata = ChannelMetadata {
-            title_template: "Test Channel #{}".to_string(),
-            description_template: "Test Description".to_string(),
-            media: "https://example.com/image.jpg".to_string(),
-            animation_url: None,
-            reference: "https://example.com/ref".to_string(),
-            reference_hash: None,
-        };
-
-        contract.create_channel(
-            "test_channel".to_string(),
-            vec![1, 2, 3],
-            metadata
-        );
-
-        let (token_id, _) = contract.nft_mint(
-            "test_channel".to_string(),
-            None,
-            accounts(2)
-        );
-
-        // Try to transfer token from wrong account
         testing_env!(context
             .predecessor_account_id(accounts(3))
+            .attached_deposit(NearToken::from_yoctonear(1))
             .build());
-        contract.nft_transfer(token_id, accounts(4));
+        contract.nft_transfer(accounts(4), token_id.to_string(), None, None);
     }
 }

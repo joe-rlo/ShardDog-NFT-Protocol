@@ -1,4 +1,5 @@
 [toolchain]
-channel = "stable"
+# near-sdk 5.4 rejects wasm from rustc newer than 1.86
+channel = "1.86.0"
 components = ["rustfmt"]
 targets = ["wasm32-unknown-unknown"]
